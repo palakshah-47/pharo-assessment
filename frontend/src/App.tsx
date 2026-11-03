@@ -1,10 +1,10 @@
 import { useState } from 'react'
+import { useQueries, useQuery } from '@tanstack/react-query'
 import { api, ApiError, type Stats } from './api'
 import { PriceChart, type ChartSeries } from './components/PriceChart'
 import { StatsPanel } from './components/StatsPanel'
 import { TickerList } from './components/TickerList'
 import { MAX_SELECTED, toggleSelection } from './lib'
-import { useFetch } from './useFetch'
 import './App.css'
 
 interface TickerData {
@@ -30,12 +30,13 @@ function ErrorBanner({ error, onRetry }: { error: Error; onRetry: () => void }) 
 export default function App() {
   const [selected, setSelected] = useState<string[]>([])
   const [limitHint, setLimitHint] = useState(false)
-
-  const instruments = useFetch(api.getInstruments, [])
-  const details = useFetch(
-    () => Promise.all(selected.map(loadTicker)),
-    [selected.join(',')],
-  )
+  const instruments = useQuery({ queryKey: ['instruments'], queryFn: api.getInstruments })
+  const detailQueries = useQueries({
+    queries: selected.map((ticker) => ({
+      queryKey: ['ticker', ticker],
+      queryFn: () => loadTicker(ticker),
+    })),
+  })
 
   function handleToggle(ticker: string) {
     const blocked = !selected.includes(ticker) && selected.length >= MAX_SELECTED
@@ -44,17 +45,23 @@ export default function App() {
   }
 
   const comparing = selected.length > 1
-  // After a selection change there is one render where `details.data` still belongs to the
-  // previous selection; only treat it as ready when it matches the current one.
-  const ready =
-    details.data !== null && details.data.map((d) => d.series.ticker).join(',') === selected.join(',')
+  const detailError = detailQueries.find((query) => query.error)?.error
+  const tickerDetails = detailQueries.flatMap((query) => (query.data ? [query.data] : []))
+  const detailsLoading = detailQueries.some((query) => query.isPending)
+  const retryDetails = () => {
+    void Promise.all(
+      detailQueries.filter((query) => query.isError).map((query) => query.refetch()),
+    )
+  }
 
   return (
     <div className="layout">
       <aside>
         <h1>Instruments</h1>
-        {instruments.loading && <p className="muted">Loading instruments…</p>}
-        {instruments.error && <ErrorBanner error={instruments.error} onRetry={instruments.retry} />}
+        {instruments.isPending && <p className="muted">Loading instruments…</p>}
+        {instruments.error && (
+          <ErrorBanner error={instruments.error} onRetry={() => void instruments.refetch()} />
+        )}
         {instruments.data && (
           <TickerList tickers={instruments.data} selected={selected} onToggle={handleToggle} />
         )}
@@ -64,15 +71,15 @@ export default function App() {
       <main>
         {selected.length === 0 ? (
           <p className="muted">Select a ticker to see its price chart and stats. Pick 2–3 to compare.</p>
-        ) : details.error ? (
-          <ErrorBanner error={details.error} onRetry={details.retry} />
-        ) : details.loading || !ready || !details.data ? (
+        ) : detailError ? (
+          <ErrorBanner error={detailError} onRetry={retryDetails} />
+        ) : detailsLoading || tickerDetails.length !== selected.length ? (
           <p className="muted">Loading…</p>
         ) : (
           <>
-            <h2>{comparing ? 'Comparison' : details.data[0].series.ticker}</h2>
-            <PriceChart series={details.data.map((d) => d.series)} />
-            <StatsPanel stats={details.data.map((d) => d.stats)} />
+            <h2>{comparing ? 'Comparison' : tickerDetails[0].series.ticker}</h2>
+            <PriceChart series={tickerDetails.map((detail) => detail.series)} />
+            <StatsPanel stats={tickerDetails.map((detail) => detail.stats)} />
           </>
         )}
       </main>
